@@ -255,7 +255,9 @@ th{position:sticky;top:0;background:#11151d;color:#9eabc0;font-size:8px;text-tra
       <div><label>Modo</label><select id="lineupMode"><option value="starters">Titulares</option><option value="bench">Suplentes</option></select></div>
      </div>
      <div class="previewList" id="rosterList" style="margin-top:10px"></div>
-     <div class="row" style="margin-top:10px"><button class="btn danger" id="clearRoster">Limpiar plantilla</button></div>
+     <div class="row" style="margin-top:10px"><button class="btn danger" id="clearRoster">Limpiar plantilla</button><button class="btn" id="autoPositions">⚡ Autocompletar posiciones</button></div>
+     <button class="btn" id="detectFormationBtn" style="width:100%;margin-top:8px">🧮 Detectar formación según jugadores</button>
+     <div class="small">Asigna POR/DFC/MC/DC a los titulares según su orden actual y la formación elegida, sin necesidad de escribirlas a mano. También podés dejar que el sistema calcule la formación (ej. 4-3-3, 3-5-2) contando cuántos jugadores tenés etiquetados en cada línea.</div>
     </section>
 
     <section class="card">
@@ -333,16 +335,48 @@ function classifyLine(position){
  if(/(mc|med|mid|dm|am|volante|centrocamp)/.test(p))return "MID";
  return "MID";
 }
+/* Detecta automáticamente la formación (defensas-medios-delanteros) contando cuántos titulares caen en cada línea */
+function detectFormationFromList(players){
+ const starterList=players.filter(p=>p.starter!==false&&!p.substitute);
+ if(starterList.length<3)return null;
+ let def=0,mid=0,fwd=0;
+ starterList.forEach(p=>{const line=classifyLine(p.position);if(line==="DEF")def++;else if(line==="FWD")fwd++;else if(line!=="GK")mid++});
+ if(!def&&!mid&&!fwd)return null;
+ return `${def||1}-${mid||1}-${fwd||1}`;
+}
+function detectFormation(team){return detectFormationFromList(teamData(team).players)}
 
-const fieldDefs=[["team","Equipo"],["number","Dorsal / número"],["name","Jugador / nombre"],["position","Posición"],["starter","Titular"],["captain","Capitán"],["subcaptain","Subcapitán"],["x","Posición X (0-100)"],["y","Posición Y (0-100)"],["photo","Foto URL"]];
+const fieldDefs=[["team","Equipo"],["side","Local/Visitante (opcional)"],["number","Dorsal / número"],["name","Jugador / nombre"],["position","Posición"],["starter","Titular"],["captain","Capitán"],["subcaptain","Subcapitán"],["x","Posición X (0-100)"],["y","Posición Y (0-100)"],["photo","Foto URL"]];
 const aliases={
- team:["equipo","team","club","teamname","equipo1","team 1"],number:["numero","número","dorsal","number","camiseta","jersey","#"],
+ team:["equipo","team","club","teamname","equipo1","team 1"],
+ side:["local visitante","local/visitante","tipo","sede","condicion","lado","localia","home away","home/away","l/v","localvisitante"],
+ number:["numero","número","dorsal","number","camiseta","jersey","#"],
  name:["jugador","player","nombre","name","futbolista"],position:["posicion","posición","position","puesto","rol"],
  starter:["titular","starter","titularidad","inicial","starting","once"],
  captain:["capitan","capitán","captain","c"],subcaptain:["subcapitan","subcapitán","subcaptain","vicecapitan","vice","sc"],
  x:["x","posx","xpos","left","horizontal"],y:["y","posy","ypos","top","vertical"],
  photo:["foto","photo","imagen","image","foto url","photo url","url foto"]
 };
+/* Normaliza el valor de una columna "Local/Visitante" a "home" o "away". Devuelve null si no reconoce el valor. */
+function normalizeSide(v){
+ const s=cleanHeader(v);
+ if(!s)return null;
+ if(["local","home","l","h","1"].includes(s))return "home";
+ if(["visitante","visita","away","v","a","2"].includes(s))return "away";
+ return null;
+}
+/* Si el Excel trae una columna explícita de Local/Visitante, arma un mapa nombre de equipo → home/away, tomando el primer valor no vacío por equipo */
+function buildSideMap(teamCol,sideCol){
+ if(!teamCol||!sideCol)return null;
+ const map={};
+ importedRows.forEach(r=>{
+  const team=String(r[teamCol]??"").trim(),side=normalizeSide(r[sideCol]);
+  if(team&&side&&!map[team])map[team]=side;
+ });
+ const sides=Object.values(map);
+ if(!sides.length||!sides.includes("home")||!sides.includes("away"))return null;
+ return map;
+}
 function cleanHeader(v){return String(v??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim().replace(/\s+/g," ")}
 function guessHeader(field){const a=aliases[field]||[];for(const h of headers){const c=cleanHeader(h);if(a.some(x=>c===cleanHeader(x)))return h}for(const h of headers){const c=cleanHeader(h);if(a.some(x=>c.includes(cleanHeader(x))))return h}return ""}
 function renderMapping(){const grid=$("mappingGrid");grid.innerHTML="";for(const [key,label] of fieldDefs){const wrap=document.createElement("div"),lab=document.createElement("label");lab.textContent=label;wrap.appendChild(lab);const sel=document.createElement("select");sel.dataset.field=key;let o=document.createElement("option");o.value="";o.textContent="— No usar —";sel.appendChild(o);headers.forEach(h=>{o=document.createElement("option");o.value=h;o.textContent=h;sel.appendChild(o)});sel.value=guessHeader(key);sel.addEventListener("change",updateImportSummary);grid.appendChild(wrap);wrap.appendChild(sel)}$("mappingBox").classList.remove("hidden");updateImportSummary()}
@@ -370,26 +404,39 @@ function detectTeams(teamCol){
 }
 function updateImportSummary(){
  const map={};document.querySelectorAll("#mappingGrid select").forEach(s=>map[s.dataset.field]=s.value);
- detectedTeams=detectTeams(map.team);
+ const sideMap=buildSideMap(map.team,map.side);
+ detectedTeams=sideMap?null:detectTeams(map.team);
  const box=$("importSummary");
  if(!map.name||!importedRows.length){box.classList.add("hidden");return}
  let starterCount=0,total=0;
  importedRows.forEach(r=>{if(!String(r[map.name]??"").trim())return;total++;const sv=map.starter?normalizeBool(r[map.starter]):true;if(sv!==false)starterCount++});
- const homeLabel=detectedTeams?(swapDetected?detectedTeams.away:detectedTeams.home):"Equipo 1";
- const awayLabel=detectedTeams?(swapDetected?detectedTeams.home:detectedTeams.away):"Equipo 2";
- box.innerHTML=`<b>Columnas encontradas:</b> ${headers.length} · <b>Jugadores:</b> ${total} (${starterCount} titulares, ${total-starterCount} suplentes)<br><b>Equipos detectados</b> → Local: <b>${esc(homeLabel)}</b> · Visitante: <b>${esc(awayLabel)}</b>${detectedTeams&&detectedTeams.extra.length?`<br><span style="color:#e9b95a">Se detectaron más de 2 valores de equipo; se usarán los dos primeros.</span>`:""}`;
+ let homeLabel="Equipo 1",awayLabel="Equipo 2",method="por orden de aparición";
+ if(sideMap){
+  const entries=Object.entries(sideMap);
+  homeLabel=(entries.find(([,s])=>s===(swapDetected?"away":"home"))||[])[0]||homeLabel;
+  awayLabel=(entries.find(([,s])=>s===(swapDetected?"home":"away")))?.[0]||awayLabel;
+  method="mediante la columna Local/Visitante";
+ }else if(detectedTeams){
+  homeLabel=swapDetected?detectedTeams.away:detectedTeams.home;
+  awayLabel=swapDetected?detectedTeams.home:detectedTeams.away;
+ }
+ box.innerHTML=`<b>Columnas encontradas:</b> ${headers.length} · <b>Jugadores:</b> ${total} (${starterCount} titulares, ${total-starterCount} suplentes)<br><b>Equipos detectados</b> (${esc(method)}) → Local: <b>${esc(homeLabel)}</b> · Visitante: <b>${esc(awayLabel)}</b>${!sideMap&&detectedTeams&&detectedTeams.extra.length?`<br><span style="color:#e9b95a">Se detectaron más de 2 valores de equipo; se usarán los dos primeros.</span>`:""}`;
  box.classList.remove("hidden");
 }
 $("swapDetected").onclick=()=>{swapDetected=!swapDetected;updateImportSummary()};
 
 $("importMapped").onclick=async()=>{
  const map={};document.querySelectorAll("#mappingGrid select").forEach(s=>map[s.dataset.field]=s.value);
- detectedTeams=detectTeams(map.team);
+ const sideMap=buildSideMap(map.team,map.side);
+ detectedTeams=sideMap?null:detectTeams(map.team);
  const grouped={home:[],away:[]};
  importedRows.forEach((r,i)=>{
   const rawTeam=String(r[map.team]??"").trim();
   let team="home";
-  if(detectedTeams){
+  if(sideMap&&sideMap[rawTeam]){
+   const side=sideMap[rawTeam];
+   team=swapDetected?(side==="home"?"away":"home"):side;
+  }else if(detectedTeams){
    const homeLabel=swapDetected?detectedTeams.away:detectedTeams.home;
    team=rawTeam===homeLabel?"home":"away";
   }else{
@@ -398,9 +445,10 @@ $("importMapped").onclick=async()=>{
   }
   const name=String(r[map.name]??"").trim();if(!name)return;
   const starterVal=map.starter?normalizeBool(r[map.starter]):true;
+  const rawPosition=map.position?String(r[map.position]??"").trim():"";
   grouped[team].push({
    id:team+"_"+Date.now()+"_"+i,team,number:map.number?String(r[map.number]??"").trim():"",
-   name,position:map.position?String(r[map.position]??"").trim():"",
+   name,position:rawPosition,
    starter:starterVal===null?true:starterVal,substitute:starterVal===false,
    captain:map.captain?!!normalizeBool(r[map.captain]):false,
    subcaptain:map.subcaptain?!!normalizeBool(r[map.subcaptain]):false,
@@ -408,11 +456,42 @@ $("importMapped").onclick=async()=>{
    photo:map.photo?String(r[map.photo]??"").trim():""
   });
  });
- ["home","away"].forEach(team=>{let capSet=false,subSet=false;grouped[team].forEach(p=>{if(p.captain){if(capSet)p.captain=false;else capSet=true}if(p.subcaptain){if(subSet)p.subcaptain=false;else subSet=true}})});
+ ["home","away"].forEach(team=>{
+  let capSet=false,subSet=false;
+  grouped[team].forEach(p=>{
+   if(p.captain){if(capSet)p.captain=false;else capSet=true}
+   if(p.subcaptain){if(subSet)p.subcaptain=false;else subSet=true}
+  });
+ });
  const patch={"home/players":grouped.home,"away/players":grouped.away};
- if(detectedTeams){patch["home/name"]=$("homeName").value.trim()||(swapDetected?detectedTeams.away:detectedTeams.home);patch["away/name"]=$("awayName").value.trim()||(swapDetected?detectedTeams.home:detectedTeams.away)}
+ if(sideMap){
+  const entries=Object.entries(sideMap);
+  const homeName=(entries.find(([,s])=>s===(swapDetected?"away":"home"))||[])[0];
+  const awayName=(entries.find(([,s])=>s===(swapDetected?"home":"away")))?.[0];
+  if(homeName)patch["home/name"]=$("homeName").value.trim()||homeName;
+  if(awayName)patch["away/name"]=$("awayName").value.trim()||awayName;
+ }else if(detectedTeams){
+  patch["home/name"]=$("homeName").value.trim()||(swapDetected?detectedTeams.away:detectedTeams.home);
+  patch["away/name"]=$("awayName").value.trim()||(swapDetected?detectedTeams.home:detectedTeams.away);
+ }
+ /* Si el Excel ya trae posiciones, se completan las que falten en base a la formación actual antes de guardar */
+ ["home","away"].forEach(team=>{
+  let starterIdx=0;
+  grouped[team].forEach(p=>{
+   const isStarter=p.starter!==false&&!p.substitute;
+   if(isStarter){if(!p.position)p.position=autoPositionForIndex(starterIdx);starterIdx++}
+  });
+ });
  await save(patch);
- alert(`Importados ${grouped.home.length+grouped.away.length} jugadores.`);
+ /* Detecta y aplica automáticamente la formación (defensas-medios-delanteros) según las posiciones importadas */
+ const detHome=detectFormationFromList(grouped.home),detAway=detectFormationFromList(grouped.away);
+ const detected=detHome||detAway;
+ if(detected){
+  await save({formation:detected});
+  $("formationPreset").value=["4-3-3","4-4-2","4-2-3-1","3-5-2","3-4-3","5-3-2","5-4-1"].includes(detected)?detected:"custom";
+  $("formation").value=detected;$("customFormationWrap").classList.toggle("hidden",$("formationPreset").value!=="custom");
+ }
+ alert(`Importados ${grouped.home.length+grouped.away.length} jugadores.${detected?" Formación detectada: "+detected+".":""}`);
 };
 
 /* ================= EDITOR MANUAL ================= */
@@ -436,6 +515,7 @@ async function upsertCaptainExclusivity(team,players){let capSet=false,subSet=fa
 $("addPlayerBtn").onclick=async()=>{
  const team=$("pTeam").value,data=readPlayerForm();
  if(!data.name){alert("Escribí el nombre del jugador.");return}
+ if(!data.position&&data.starter){data.position=autoPositionForIndex(starters(team).length)}
  let players=[...teamData(team).players,{id:team+"_"+Date.now(),team,...data}];
  players=await upsertCaptainExclusivity(team,players);
  await save({[team+"/players"]:players});
@@ -478,8 +558,9 @@ $("swapTeams").onclick=async()=>{
  });
 };
 
+function formationRows(){return [1,...(state.formation||"4-3-3").split("-").map(Number).filter(n=>Number.isFinite(n)&&n>0)]}
 function fallbackPosition(i,total){
- const rows=[1,...(state.formation||"4-3-3").split("-").map(Number).filter(n=>Number.isFinite(n)&&n>0)],rowCount=rows.length;
+ const rows=formationRows(),rowCount=rows.length;
  let n=0;
  for(let row=0;row<rows.length;row++)for(let j=0;j<rows[row];j++){
   if(n===i){const x=18+((j+1)/(rows[row]+1))*64;const y=rowCount>1?8+(row/(rowCount-1))*84:50;return{x,y}}
@@ -487,11 +568,72 @@ function fallbackPosition(i,total){
  }
  return{x:50,y:50}
 }
+/* Agrupa titulares por línea real (según su posición) y calcula X/Y automático fila por fila, en vez de asumir que ya están ordenados en el arreglo */
+function classifiedGroups(list){
+ const groups={GK:[],DEF:[],MID:[],FWD:[]};
+ list.forEach(p=>groups[classifyLine(p.position)].push(p));
+ return groups;
+}
+function autoLayout(list){
+ const rows=formationRows(),rowCount=rows.length,groups=classifiedGroups(list),positions={};
+ function placeRow(arr,rowIdx){
+  if(!arr.length)return;
+  const y=rowCount>1?8+(rowIdx/(rowCount-1))*84:50,n=arr.length;
+  arr.forEach((p,j)=>{positions[p.id]={x:18+((j+1)/(n+1))*64,y}});
+ }
+ placeRow(groups.GK,0);
+ placeRow(groups.DEF,1);
+ if(rowCount<=4){
+  placeRow(groups.MID,rowCount>=3?2:1);
+  placeRow(groups.FWD,rowCount-1);
+ }else{
+  const midRowsIdx=[];for(let r=2;r<=rowCount-2;r++)midRowsIdx.push(r);
+  const totalMidSlots=midRowsIdx.reduce((a,r)=>a+rows[r],0)||midRowsIdx.length;
+  let cursor=0;
+  midRowsIdx.forEach((r,idx)=>{
+   const isLast=idx===midRowsIdx.length-1;
+   const share=isLast?groups.MID.length-cursor:Math.round((rows[r]/totalMidSlots)*groups.MID.length);
+   placeRow(groups.MID.slice(cursor,cursor+share),r);
+   cursor+=share;
+  });
+  placeRow(groups.FWD,rowCount-1);
+ }
+ return positions;
+}
+
+function lineLabelForRow(row,rowCount){
+ if(row===0)return "POR";
+ if(row===rowCount-1)return "DC";
+ if(row===1)return "DFC";
+ return "MC";
+}
+function autoPositionForIndex(i){
+ const rows=formationRows();let n=0;
+ for(let row=0;row<rows.length;row++)for(let j=0;j<rows[row];j++){if(n===i)return lineLabelForRow(row,rows.length);n++}
+ return "MC";
+}
+/* Recalcula y guarda la posición (texto) de todos los titulares de un equipo según su orden actual y la formación */
+async function autoAssignPositions(team){
+ const ps=starters(team),ids=new Set(ps.map(p=>p.id));
+ const relabeled=ps.map((p,i)=>({...p,position:autoPositionForIndex(i)}));
+ const merged=teamData(team).players.map(p=>ids.has(p.id)?relabeled.find(r=>r.id===p.id):p);
+ await save({[team+"/players"]:merged});
+}
+$("autoPositions").onclick=()=>autoAssignPositions($("viewTeam").value);
+$("detectFormationBtn").onclick=async()=>{
+ const team=$("viewTeam").value,f=detectFormation(team);
+ if(!f){alert("No hay suficientes jugadores titulares con posición asignada para detectar la formación.");return}
+ await save({formation:f});
+ $("formationPreset").value=["4-3-3","4-4-2","4-2-3-1","3-5-2","3-4-3","5-3-2","5-4-1"].includes(f)?f:"custom";
+ $("formation").value=f;$("customFormationWrap").classList.toggle("hidden",$("formationPreset").value!=="custom");
+ alert("Formación detectada para "+(teamData(team).name||team.toUpperCase())+": "+f);
+};
 function renderAdminPreview(){
  const team=$("viewTeam").value,mode=$("lineupMode").value,arr=mode==="bench"?[]:starters(team),container=$("previewPlayers");
  $("pvTeam").textContent=teamData(team).name||team.toUpperCase();$("pvEyebrow").textContent=`${mode==="bench"?"SUPLENTES (sin editor de cancha)":"TITULARES"} · ${state.formation||"4-3-3"}`;container.innerHTML="";
+ const auto=autoLayout(arr);
  arr.forEach((p,i)=>{
-  const pos=p.x!=null&&p.y!=null?{x:p.x,y:p.y}:fallbackPosition(i,arr.length),el=document.createElement("div");el.className="previewPlayer";el.style.left=pos.x+"%";el.style.top=pos.y+"%";
+  const pos=p.x!=null&&p.y!=null?{x:p.x,y:p.y}:(auto[p.id]||fallbackPosition(i,arr.length)),el=document.createElement("div");el.className="previewPlayer";el.style.left=pos.x+"%";el.style.top=pos.y+"%";
   const bg=p.photo?`style="background-image:url('${esc(p.photo)}')"`:"";
   const badge=p.captain?'<span class="capBadge">C</span>':p.subcaptain?'<span class="capBadge sub">SC</span>':"";
   el.innerHTML=`<div class="previewDot ${p.photo?"hasPhoto":""}" ${bg}>${esc(p.number||i+1)}${badge}</div><b>${esc(p.name)}</b><small>${esc(p.position||"")}</small>`;
@@ -538,7 +680,8 @@ function renderOverlay(){
   bs.forEach((p,i)=>{const pos=fallbackPosition(i,bs.length),el=document.createElement("div");el.className="player";el.dataset.line="BENCH";el.style.left=pos.x+"%";el.style.top=pos.y+"%";const photo=p.photo?`style="background-image:url('${esc(p.photo)}')"`:"";const badge=p.captain?'<span class="captainBadge">C</span>':p.subcaptain?'<span class="captainBadge sub">SC</span>':"";el.innerHTML=`<div class="playerDot ${p.photo?"hasPhoto":""}" ${photo}><span>${esc(p.number||i+1)}</span>${badge}</div><div class="playerName">${esc(p.name)}</div><div class="playerPos">${esc(p.position||"")}</div>`;layer.appendChild(el)});
   $("benchChips").innerHTML="";
  }else{
-  ps.forEach((p,i)=>{const pos=p.x!=null&&p.y!=null?{x:p.x,y:p.y}:fallbackPosition(i,ps.length),el=document.createElement("div");el.className="player "+team;el.dataset.line=classifyLine(p.position);el.style.left=pos.x+"%";el.style.top=pos.y+"%";const photo=p.photo?`style="background-image:url('${esc(p.photo)}')"`:"";const badge=p.captain?'<span class="captainBadge">C</span>':p.subcaptain?'<span class="captainBadge sub">SC</span>':"";el.innerHTML=`<div class="playerDot ${p.photo?"hasPhoto":""}" ${photo}><span>${esc(p.number||i+1)}</span>${badge}</div><div class="playerName">${esc(p.name)}</div><div class="playerPos">${esc(p.position||"")}</div>`;layer.appendChild(el)});
+  const auto=autoLayout(ps);
+  ps.forEach((p,i)=>{const pos=p.x!=null&&p.y!=null?{x:p.x,y:p.y}:(auto[p.id]||fallbackPosition(i,ps.length)),el=document.createElement("div");el.className="player "+team;el.dataset.line=classifyLine(p.position);el.style.left=pos.x+"%";el.style.top=pos.y+"%";const photo=p.photo?`style="background-image:url('${esc(p.photo)}')"`:"";const badge=p.captain?'<span class="captainBadge">C</span>':p.subcaptain?'<span class="captainBadge sub">SC</span>':"";el.innerHTML=`<div class="playerDot ${p.photo?"hasPhoto":""}" ${photo}><span>${esc(p.number||i+1)}</span>${badge}</div><div class="playerName">${esc(p.name)}</div><div class="playerPos">${esc(p.position||"")}</div>`;layer.appendChild(el)});
   $("benchChips").innerHTML=(scope==="all"?bs:[]).map(p=>`<span class="benchChip">${esc(p.number?`#${p.number} `:"")}${esc(p.name)}</span>`).join("");
  }
 }
@@ -564,11 +707,11 @@ function playOverlay(){
 /* ================= XLSX TEMPLATE ================= */
 $("downloadTemplate").onclick=()=>{
  const rows=[
- ["equipo","numero","jugador","posicion","titular","capitan","subcapitan","x","y","foto"],
- ["LOCAL",1,"Portero","POR","SI","","",50,91,""],["LOCAL",4,"Defensa 1","DFC","SI","","",25,72,""],["LOCAL",5,"Defensa 2","DFC","SI","","",42,72,""],["LOCAL",2,"Defensa 3","DFC","SI","","",58,72,""],["LOCAL",3,"Defensa 4","DFC","SI","","",75,72,""],
- ["LOCAL",8,"Mediocampista 1","MC","SI","","",35,52,""],["LOCAL",6,"Mediocampista 2","MC","SI","SI","",50,48,""],["LOCAL",10,"Mediocampista 3","MC","SI","","",65,52,""],["LOCAL",11,"Extremo 1","EXT","SI","","",28,27,""],["LOCAL",9,"Delantero","DC","SI","","",50,20,""],["LOCAL",7,"Extremo 2","EXT","SI","","",72,27,""],["LOCAL",12,"Suplente 1","SUB","NO","","","","",""],
- ["VISITANTE",1,"Portero","POR","SI","","",50,9,""],["VISITANTE",4,"Defensa 1","DFC","SI","","",75,28,""],["VISITANTE",5,"Defensa 2","DFC","SI","","",58,28,""],["VISITANTE",2,"Defensa 3","DFC","SI","","",42,28,""],["VISITANTE",3,"Defensa 4","DFC","SI","","",25,28,""],
- ["VISITANTE",8,"Mediocampista 1","MC","SI","","",65,48,""],["VISITANTE",6,"Mediocampista 2","MC","SI","SI","",50,52,""],["VISITANTE",10,"Mediocampista 3","MC","SI","","",35,48,""],["VISITANTE",11,"Extremo 1","EXT","SI","","",72,73,""],["VISITANTE",9,"Delantero","DC","SI","","",50,80,""],["VISITANTE",7,"Extremo 2","EXT","SI","","",28,73,""],["VISITANTE",12,"Suplente 1","SUB","NO","","","","",""]
+ ["equipo","local_visitante","numero","jugador","posicion","titular","capitan","subcapitan","x","y","foto"],
+ ["Sarchí FC","LOCAL",1,"Portero","POR","SI","","",50,91,""],["Sarchí FC","LOCAL",4,"Defensa 1","DFC","SI","","",25,72,""],["Sarchí FC","LOCAL",5,"Defensa 2","DFC","SI","","",42,72,""],["Sarchí FC","LOCAL",2,"Defensa 3","DFC","SI","","",58,72,""],["Sarchí FC","LOCAL",3,"Defensa 4","DFC","SI","","",75,72,""],
+ ["Sarchí FC","LOCAL",8,"Mediocampista 1","MC","SI","","",35,52,""],["Sarchí FC","LOCAL",6,"Mediocampista 2","MC","SI","SI","",50,48,""],["Sarchí FC","LOCAL",10,"Mediocampista 3","MC","SI","","",65,52,""],["Sarchí FC","LOCAL",11,"Extremo 1","EXT","SI","","",28,27,""],["Sarchí FC","LOCAL",9,"Delantero","DC","SI","","",50,20,""],["Sarchí FC","LOCAL",7,"Extremo 2","EXT","SI","","",72,27,""],["Sarchí FC","LOCAL",12,"Suplente 1","SUB","NO","","","","",""],
+ ["Deportivo Cambute","VISITANTE",1,"Portero","POR","SI","","",50,9,""],["Deportivo Cambute","VISITANTE",4,"Defensa 1","DFC","SI","","",75,28,""],["Deportivo Cambute","VISITANTE",5,"Defensa 2","DFC","SI","","",58,28,""],["Deportivo Cambute","VISITANTE",2,"Defensa 3","DFC","SI","","",42,28,""],["Deportivo Cambute","VISITANTE",3,"Defensa 4","DFC","SI","","",25,28,""],
+ ["Deportivo Cambute","VISITANTE",8,"Mediocampista 1","MC","SI","","",65,48,""],["Deportivo Cambute","VISITANTE",6,"Mediocampista 2","MC","SI","SI","",50,52,""],["Deportivo Cambute","VISITANTE",10,"Mediocampista 3","MC","SI","","",35,48,""],["Deportivo Cambute","VISITANTE",11,"Extremo 1","EXT","SI","","",72,73,""],["Deportivo Cambute","VISITANTE",9,"Delantero","DC","SI","","",50,80,""],["Deportivo Cambute","VISITANTE",7,"Extremo 2","EXT","SI","","",28,73,""],["Deportivo Cambute","VISITANTE",12,"Suplente 1","SUB","NO","","","","",""]
  ];
  const ws=XLSX.utils.aoa_to_sheet(rows),wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Plantilla");XLSX.writeFile(wb,"plantilla_alineaciones_astra.xlsx");
 };
