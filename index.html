@@ -186,7 +186,7 @@ th{position:sticky;top:0;background:#11151d;color:#9eabc0;font-size:8px;text-tra
      <div class="formGrid">
       <div><label>Competición</label><input id="competition" placeholder="LIGA / TORNEO"></div>
       <div>
-       <label>Formación</label>
+       <label>Formación del equipo seleccionado (automática)</label>
        <select id="formationPreset">
         <option value="4-3-3">4-3-3</option><option value="4-4-2">4-4-2</option><option value="4-2-3-1">4-2-3-1</option>
         <option value="3-5-2">3-5-2</option><option value="3-4-3">3-4-3</option><option value="5-3-2">5-3-2</option>
@@ -257,8 +257,7 @@ th{position:sticky;top:0;background:#11151d;color:#9eabc0;font-size:8px;text-tra
      <div class="previewList" id="rosterList" style="margin-top:10px"></div>
      <div class="row" style="margin-top:10px"><button class="btn danger" id="clearRoster">Limpiar plantilla</button><button class="btn" id="autoPositions">⚡ Autocompletar posiciones</button></div>
      <button class="btn" id="detectFormationBtn" style="width:100%;margin-top:8px">🧮 Detectar formación según jugadores</button>
-     <label class="check"><input type="checkbox" id="autoFormationToggle" checked> Detectar formación automáticamente al agregar/editar jugadores</label>
-     <div class="small">Asigna POR/DFC/MC/DC a los titulares según su orden actual y la formación elegida, sin necesidad de escribirlas a mano. También podés dejar que el sistema calcule la formación (ej. 4-3-3, 3-5-2) contando cuántos jugadores tenés etiquetados en cada línea. Con la casilla activada, esto sucede solo cada vez que agregás, editás o cambiás de titular/suplente a un jugador — no hace falta tocar nada más.</div>
+     <div class="small">La formación se detecta automáticamente por equipo usando únicamente los 11 titulares. Los suplentes no cuentan. Si el Excel trae las posiciones, el sistema calcula la mejor formación válida y genera el layout automáticamente. Podés cambiarla manualmente si necesitás una excepción.</div>
     </section>
 
     <section class="card">
@@ -310,17 +309,18 @@ const params=new URLSearchParams(location.search),matchId=params.get("match")||"
 /* Nodo exclusivo de este gráfico dentro de la base compartida astraprods: alineaciones/{match} */
 const ref=db.ref("alineaciones/"+matchId);
 
+const VALID_FORMATIONS=["4-3-3","4-4-2","4-2-3-1","3-5-2","3-4-3","5-3-2","5-4-1","4-1-4-1","4-2-2-2","3-4-2-1","3-4-1-2","5-2-3"];
 const defaults={
  competition:"ALINEACIONES",formation:"4-3-3",
- home:{name:"LOCAL",logo:"",players:[]},away:{name:"VISITANTE",logo:"",players:[]},
- settings:{animStyle:"cinematic",animDelay:180,active:false,activeTeam:"home",scope:"all",sequence:0,autoFormation:true}
+ home:{name:"LOCAL",logo:"",formation:"4-3-3",players:[]},away:{name:"VISITANTE",logo:"",formation:"4-3-3",players:[]},
+ settings:{animStyle:"cinematic",animDelay:180,active:false,activeTeam:"home",scope:"all",sequence:0}
 };
 let state=JSON.parse(JSON.stringify(defaults)),importedRows=[],headers=[],currentWorkbook=null,lastSequence=0;
 let detectedTeams=null,swapDetected=false,editingId=null;
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
 const save=p=>ref.update(p);
-function deepMerge(base,data){const out={...base,...(data||{})};out.home={...base.home,...(data&&data.home||{})};out.away={...base.away,...(data&&data.away||{})};out.settings={...base.settings,...(data&&data.settings||{})};out.home.players=Array.isArray(out.home.players)?out.home.players:[];out.away.players=Array.isArray(out.away.players)?out.away.players:[];return out}
+function deepMerge(base,data){const out={...base,...(data||{})};out.home={...base.home,...(data&&data.home||{})};out.away={...base.away,...(data&&data.away||{})};out.settings={...base.settings,...(data&&data.settings||{})};out.home.players=Array.isArray(out.home.players)?out.home.players:[];out.away.players=Array.isArray(out.away.players)?out.away.players:[];out.home.formation=out.home.formation||out.formation||"4-3-3";out.away.formation=out.away.formation||out.formation||"4-3-3";return out}
 function teamData(team){return state[team]||defaults[team]}
 function starters(team){return teamData(team).players.filter(p=>p.starter!==false&&!p.substitute)}
 function subs(team){return teamData(team).players.filter(p=>p.substitute||p.starter===false)}
@@ -336,33 +336,20 @@ function classifyLine(position){
  if(/(mc|med|mid|dm|am|volante|centrocamp)/.test(p))return "MID";
  return "MID";
 }
-/* Detecta automáticamente la formación (defensas-medios-delanteros) contando cuántos titulares caen en cada línea */
-function detectFormationFromList(players){
- const starterList=players.filter(p=>p.starter!==false&&!p.substitute);
- if(starterList.length<3)return null;
- let def=0,mid=0,fwd=0;
- starterList.forEach(p=>{const line=classifyLine(p.position);if(line==="DEF")def++;else if(line==="FWD")fwd++;else if(line!=="GK")mid++});
- if(!def&&!mid&&!fwd)return null;
- return `${def||1}-${mid||1}-${fwd||1}`;
-}
+/* ================= DETECCIÓN AUTOMÁTICA DE FORMACIÓN ================= */
+function formationParts(formation){return String(formation||"").split("-").map(Number).filter(n=>Number.isFinite(n)&&n>0)}
+function getFormationDistribution(formation){const rows=formationParts(formation);if(rows.length<2)return null;return {DEF:rows[0],MID:rows.slice(1,-1).reduce((a,b)=>a+b,0),FWD:rows[rows.length-1]}}
+function countPlayerLines(players){const list=players.filter(p=>p.starter!==false&&!p.substitute),counts={GK:0,DEF:0,MID:0,FWD:0};list.forEach(p=>counts[classifyLine(p.position)]++);return {starters:list.length,...counts}}
+function detectBestFormation(players){const counts=countPlayerLines(players);if(counts.starters!==11)return {formation:null,counts,reason:`Se detectaron ${counts.starters} titulares; se necesitan 11.`};if(counts.GK!==1)return {formation:null,counts,reason:`Se detectaron ${counts.GK} arqueros; debe existir exactamente 1.`};if(counts.DEF+counts.MID+counts.FWD!==10)return {formation:null,counts,reason:"La distribución de jugadores de campo no suma 10."};let best=null;VALID_FORMATIONS.forEach(formation=>{const d=getFormationDistribution(formation);const score=Math.abs(counts.DEF-d.DEF)+Math.abs(counts.MID-d.MID)+Math.abs(counts.FWD-d.FWD);if(!best||score<best.score)best={formation,score,confidence:Math.max(0,100-score*20),counts,exact:score===0}});return best}
+function detectFormationFromList(players){return detectBestFormation(players)?.formation||null}
 function detectFormation(team){return detectFormationFromList(teamData(team).players)}
-
-/* Sincroniza los selectores de formación (preset/personalizada) con un valor dado, sin disparar guardado */
-function applyFormationToUI(f){
- if(!wantsAdmin||!f)return;
- const known=["4-3-3","4-4-2","4-2-3-1","3-5-2","3-4-3","5-3-2","5-4-1"];
- $("formationPreset").value=known.includes(f)?f:"custom";
- $("formation").value=f;
- $("customFormationWrap").classList.toggle("hidden",$("formationPreset").value!=="custom");
-}
-/* Detecta y aplica automáticamente la formación de un equipo si el modo automático está activo. Se llama tras cualquier alta/edición/cambio de titularidad. */
-async function maybeAutoDetectFormation(team){
- if(state.settings&&state.settings.autoFormation===false)return;
- const f=detectFormation(team);
- if(!f||f===state.formation)return;
- await save({formation:f});
- applyFormationToUI(f);
-}
+function getTeamFormation(team){return teamData(team).formation||state.formation||"4-3-3"}
+function formationRows(team){return [1,...formationParts(getTeamFormation(team))]}
+function lineLabelForRow(row,rowCount){if(row===0)return "POR";if(row===rowCount-1)return "DC";if(row===1)return "DFC";return "MC"}
+function autoPositionForIndex(i,team){const rows=formationRows(team);let n=0;for(let row=0;row<rows.length;row++)for(let j=0;j<rows[row];j++){if(n===i)return lineLabelForRow(row,rows.length);n++}return "MC"}
+async function autoDetectTeamFormation(team){const result=detectBestFormation(teamData(team).players);if(result?.formation)await save({[team+"/formation"]:result.formation});return result}
+async function processTeamAutomatically(team){const result=await autoDetectTeamFormation(team);if(!result?.formation)return result;await autoAssignPositions(team);return result}
+async function processMatchAutomatically(){return {home:await processTeamAutomatically("home"),away:await processTeamAutomatically("away")}}
 
 const fieldDefs=[["team","Equipo"],["side","Local/Visitante (opcional)"],["number","Dorsal / número"],["name","Jugador / nombre"],["position","Posición"],["starter","Titular"],["captain","Capitán"],["subcaptain","Subcapitán"],["x","Posición X (0-100)"],["y","Posición Y (0-100)"],["photo","Foto URL"]];
 const aliases={
@@ -395,8 +382,7 @@ function buildSideMap(teamCol,sideCol){
  if(!sides.length||!sides.includes("home")||!sides.includes("away"))return null;
  return map;
 }
-/* Limpia un encabezado para comparar contra los alias: quita acentos, pasa a minúsculas y normaliza espacios, guiones y guiones bajos como separadores */
-function cleanHeader(v){return String(v??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim().replace(/[_\-\/]+/g," ").replace(/\s+/g," ").trim()}
+function cleanHeader(v){return String(v??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim().replace(/\s+/g," ")}
 function guessHeader(field){const a=aliases[field]||[];for(const h of headers){const c=cleanHeader(h);if(a.some(x=>c===cleanHeader(x)))return h}for(const h of headers){const c=cleanHeader(h);if(a.some(x=>c.includes(cleanHeader(x))))return h}return ""}
 function renderMapping(){const grid=$("mappingGrid");grid.innerHTML="";for(const [key,label] of fieldDefs){const wrap=document.createElement("div"),lab=document.createElement("label");lab.textContent=label;wrap.appendChild(lab);const sel=document.createElement("select");sel.dataset.field=key;let o=document.createElement("option");o.value="";o.textContent="— No usar —";sel.appendChild(o);headers.forEach(h=>{o=document.createElement("option");o.value=h;o.textContent=h;sel.appendChild(o)});sel.value=guessHeader(key);sel.addEventListener("change",updateImportSummary);grid.appendChild(wrap);wrap.appendChild(sel)}$("mappingBox").classList.remove("hidden");updateImportSummary()}
 function renderRaw(rows){const wrap=$("rawTableWrap"),table=$("rawTable");if(!rows.length){wrap.classList.add("hidden");return}table.innerHTML="";let tr=document.createElement("tr");headers.slice(0,12).forEach(h=>{const th=document.createElement("th");th.textContent=h;tr.appendChild(th)});table.appendChild(tr);rows.slice(0,8).forEach(r=>{tr=document.createElement("tr");headers.slice(0,12).forEach(h=>{const td=document.createElement("td");td.textContent=r[h]??"";tr.appendChild(td)});table.appendChild(tr)});wrap.classList.remove("hidden")}
@@ -471,7 +457,7 @@ $("importMapped").onclick=async()=>{
    starter:starterVal===null?true:starterVal,substitute:starterVal===false,
    captain:map.captain?!!normalizeBool(r[map.captain]):false,
    subcaptain:map.subcaptain?!!normalizeBool(r[map.subcaptain]):false,
-   x:map.x&&r[map.x]!==""?Number(r[map.x]):null,y:map.y&&r[map.y]!==""?Number(r[map.y]):null,
+   x:null,y:null,
    photo:map.photo?String(r[map.photo]??"").trim():""
   });
  });
@@ -493,26 +479,14 @@ $("importMapped").onclick=async()=>{
   patch["home/name"]=$("homeName").value.trim()||(swapDetected?detectedTeams.away:detectedTeams.home);
   patch["away/name"]=$("awayName").value.trim()||(swapDetected?detectedTeams.home:detectedTeams.away);
  }
- /* Si el Excel ya trae posiciones, se completan las que falten en base a la formación actual antes de guardar */
- ["home","away"].forEach(team=>{
-  let starterIdx=0;
-  grouped[team].forEach(p=>{
-   const isStarter=p.starter!==false&&!p.substitute;
-   if(isStarter){if(!p.position)p.position=autoPositionForIndex(starterIdx);starterIdx++}
-  });
- });
  await save(patch);
- /* Detecta y aplica automáticamente la formación (defensas-medios-delanteros) según las posiciones importadas, si el modo automático está activo */
- let detected=null;
- if(!(state.settings&&state.settings.autoFormation===false)){
-  const detHome=detectFormationFromList(grouped.home),detAway=detectFormationFromList(grouped.away);
-  detected=detHome||detAway;
-  if(detected){
-   await save({formation:detected});
-   applyFormationToUI(detected);
-  }
- }
- alert(`Importados ${grouped.home.length+grouped.away.length} jugadores.${detected?" Formación detectada: "+detected+".":""}`);
+ const homeResult=detectBestFormation(grouped.home);
+ const awayResult=detectBestFormation(grouped.away);
+ const formationPatch={};
+ if(homeResult?.formation)formationPatch["home/formation"]=homeResult.formation;
+ if(awayResult?.formation)formationPatch["away/formation"]=awayResult.formation;
+ if(Object.keys(formationPatch).length)await save(formationPatch);
+ alert(`Importados ${grouped.home.length+grouped.away.length} jugadores.\n\nLOCAL: ${homeResult?.formation||"no detectada"}\nVISITANTE: ${awayResult?.formation||"no detectada"}`);
 };
 
 /* ================= EDITOR MANUAL ================= */
@@ -541,7 +515,6 @@ $("addPlayerBtn").onclick=async()=>{
  players=await upsertCaptainExclusivity(team,players);
  await save({[team+"/players"]:players});
  clearPlayerForm();
- await maybeAutoDetectFormation(team);
 };
 $("updatePlayerBtn").onclick=async()=>{
  const team=$("pTeam").value,data=readPlayerForm();
@@ -550,119 +523,65 @@ $("updatePlayerBtn").onclick=async()=>{
  players=await upsertCaptainExclusivity(team,players);
  await save({[team+"/players"]:players});
  endEdit();
- await maybeAutoDetectFormation(team);
 };
 
 function renderRoster(){
  const team=$("viewTeam").value,mode=$("lineupMode").value,arr=mode==="bench"?subs(team):starters(team),list=$("rosterList");
  list.innerHTML=arr.length?arr.map((p,i)=>`<div class="playerRow" data-id="${esc(p.id)}"><div class="numBox">${esc(p.number||i+1)}</div><div><b>${esc(p.name)}${p.captain?'<span class="miniBadge">C</span>':""}${p.subcaptain?'<span class="miniBadge sub">SC</span>':""}</b><small>${esc(p.position||"SIN POSICIÓN")}</small></div><div class="rowActions"><button data-toggle="${esc(p.id)}">${p.starter===false||p.substitute?"→ Titular":"→ Suplente"}</button><button class="danger" data-remove="${esc(p.id)}">Quitar</button></div></div>`).join(""):"<div class='small'>No hay jugadores en esta vista.</div>";
  list.querySelectorAll(".playerRow").forEach(row=>row.addEventListener("click",e=>{if(e.target.closest("button"))return;const p=teamData(team).players.find(x=>x.id===row.dataset.id);if(p)startEdit(team,p)}));
- list.querySelectorAll("[data-remove]").forEach(btn=>btn.onclick=async e=>{e.stopPropagation();const id=btn.dataset.remove;await save({[team+"/players"]:teamData(team).players.filter(p=>p.id!==id)});if(editingId===id)endEdit();await maybeAutoDetectFormation(team)});
- list.querySelectorAll("[data-toggle]").forEach(btn=>btn.onclick=async e=>{e.stopPropagation();const id=btn.dataset.toggle;const players=teamData(team).players.map(p=>p.id===id?{...p,starter:!(p.starter===false||p.substitute),substitute:!!(p.starter===false||p.substitute)?false:true}:p);await save({[team+"/players"]:players});await maybeAutoDetectFormation(team)});
+ list.querySelectorAll("[data-remove]").forEach(btn=>btn.onclick=async e=>{e.stopPropagation();const id=btn.dataset.remove;await save({[team+"/players"]:teamData(team).players.filter(p=>p.id!==id)});if(editingId===id)endEdit()});
+ list.querySelectorAll("[data-toggle]").forEach(btn=>btn.onclick=async e=>{e.stopPropagation();const id=btn.dataset.toggle;const players=teamData(team).players.map(p=>p.id===id?{...p,starter:!(p.starter===false||p.substitute),substitute:!!(p.starter===false||p.substitute)?false:true}:p);await save({[team+"/players"]:players})});
  renderAdminPreview();
 }
-$("viewTeam").onchange=()=>{$("pTeam").value=$("viewTeam").value;renderRoster()};$("lineupMode").onchange=renderRoster;
+$("viewTeam").onchange=()=>{const team=$("viewTeam").value;$("pTeam").value=team;const f=getTeamFormation(team);$("formation").value=f;$("formationPreset").value=VALID_FORMATIONS.includes(f)?f:"custom";$("customFormationWrap").classList.toggle("hidden",$("formationPreset").value!=="custom");renderRoster()};$("lineupMode").onchange=renderRoster;
 $("clearRoster").onclick=async()=>{const team=$("viewTeam").value;if(confirm("¿Limpiar toda la plantilla de este equipo?"))await save({[team+"/players"]:[]})};
-$("autoFormationToggle").onchange=()=>save({"settings/autoFormation":$("autoFormationToggle").checked});
 
-/* Formación: preset + personalizada */
-$("formationPreset").onchange=()=>{
- const v=$("formationPreset").value;
- if(v==="custom"){$("customFormationWrap").classList.remove("hidden");$("formation").focus()}
- else{$("customFormationWrap").classList.add("hidden");$("formation").value=v;persistMatchFields()}
-};
-$("formation").addEventListener("change",persistMatchFields);
-function persistMatchFields(){save({competition:$("competition").value.trim(),formation:$("formation").value.trim()||"4-3-3","home/name":$("homeName").value.trim()||"LOCAL","home/logo":$("homeLogo").value.trim(),"away/name":$("awayName").value.trim()||"VISITANTE","away/logo":$("awayLogo").value.trim(),"settings/animStyle":$("animStyle").value,"settings/animDelay":Math.max(80,Math.min(1200,Number($("animDelay").value)||180))})}
-["competition","homeName","homeLogo","awayName","awayLogo","animStyle","animDelay"].forEach(id=>$(id).addEventListener("change",persistMatchFields));
-$("swapTeams").onclick=async()=>{
- const home=teamData("home"),away=teamData("away");
- await save({
-  "home/name":away.name,"home/logo":away.logo,"home/players":away.players.map(p=>({...p,team:"home"})),
-  "away/name":home.name,"away/logo":home.logo,"away/players":home.players.map(p=>({...p,team:"away"}))
- });
-};
-
-function formationRows(){return [1,...(state.formation||"4-3-3").split("-").map(Number).filter(n=>Number.isFinite(n)&&n>0)]}
-function fallbackPosition(i,total){
- const rows=formationRows(),rowCount=rows.length;
- let n=0;
- for(let row=0;row<rows.length;row++)for(let j=0;j<rows[row];j++){
-  if(n===i){const x=18+((j+1)/(rows[row]+1))*64;const y=rowCount>1?8+(row/(rowCount-1))*84:50;return{x,y}}
-  n++;
- }
- return{x:50,y:50}
-}
-/* Agrupa titulares por línea real (según su posición) y calcula X/Y automático fila por fila, en vez de asumir que ya están ordenados en el arreglo */
-function classifiedGroups(list){
- const groups={GK:[],DEF:[],MID:[],FWD:[]};
- list.forEach(p=>groups[classifyLine(p.position)].push(p));
- return groups;
-}
-function autoLayout(list){
- const rows=formationRows(),rowCount=rows.length,groups=classifiedGroups(list),positions={};
- function placeRow(arr,rowIdx){
-  if(!arr.length)return;
-  const y=rowCount>1?8+(rowIdx/(rowCount-1))*84:50,n=arr.length;
-  arr.forEach((p,j)=>{positions[p.id]={x:18+((j+1)/(n+1))*64,y}});
- }
- placeRow(groups.GK,0);
- placeRow(groups.DEF,1);
- if(rowCount<=4){
-  placeRow(groups.MID,rowCount>=3?2:1);
-  placeRow(groups.FWD,rowCount-1);
- }else{
-  const midRowsIdx=[];for(let r=2;r<=rowCount-2;r++)midRowsIdx.push(r);
-  const totalMidSlots=midRowsIdx.reduce((a,r)=>a+rows[r],0)||midRowsIdx.length;
-  let cursor=0;
-  midRowsIdx.forEach((r,idx)=>{
-   const isLast=idx===midRowsIdx.length-1;
-   const share=isLast?groups.MID.length-cursor:Math.round((rows[r]/totalMidSlots)*groups.MID.length);
-   placeRow(groups.MID.slice(cursor,cursor+share),r);
-   cursor+=share;
-  });
-  placeRow(groups.FWD,rowCount-1);
- }
- return positions;
-}
-
-function lineLabelForRow(row,rowCount){
- if(row===0)return "POR";
- if(row===rowCount-1)return "DC";
- if(row===1)return "DFC";
- return "MC";
-}
-function autoPositionForIndex(i){
- const rows=formationRows();let n=0;
- for(let row=0;row<rows.length;row++)for(let j=0;j<rows[row];j++){if(n===i)return lineLabelForRow(row,rows.length);n++}
- return "MC";
-}
-/* Recalcula y guarda la posición (texto) de todos los titulares de un equipo según su orden actual y la formación */
-async function autoAssignPositions(team){
- const ps=starters(team),ids=new Set(ps.map(p=>p.id));
- const relabeled=ps.map((p,i)=>({...p,position:autoPositionForIndex(i)}));
- const merged=teamData(team).players.map(p=>ids.has(p.id)?relabeled.find(r=>r.id===p.id):p);
- await save({[team+"/players"]:merged});
-}
-$("autoPositions").onclick=()=>autoAssignPositions($("viewTeam").value);
 $("detectFormationBtn").onclick=async()=>{
- const team=$("viewTeam").value,f=detectFormation(team);
- if(!f){alert("No hay suficientes jugadores titulares con posición asignada para detectar la formación.");return}
- await save({formation:f});
- applyFormationToUI(f);
- alert("Formación detectada para "+(teamData(team).name||team.toUpperCase())+": "+f);
+ const team=$("viewTeam").value,result=detectBestFormation(teamData(team).players);
+ if(!result?.formation){alert(result?.reason||"No se pudo detectar la formación. Verificá que existan 11 titulares con posición.");return}
+ await save({[team+"/formation"]:result.formation});
+ $("formation").value=result.formation;
+ $("formationPreset").value=VALID_FORMATIONS.includes(result.formation)?result.formation:"custom";
+ $("customFormationWrap").classList.toggle("hidden",$("formationPreset").value!=="custom");
+ renderAdminPreview();
+ alert("Formación detectada para "+(teamData(team).name||team.toUpperCase())+": "+result.formation);
 };
 function renderAdminPreview(){
  const team=$("viewTeam").value,mode=$("lineupMode").value,arr=mode==="bench"?[]:starters(team),container=$("previewPlayers");
- $("pvTeam").textContent=teamData(team).name||team.toUpperCase();$("pvEyebrow").textContent=`${mode==="bench"?"SUPLENTES (sin editor de cancha)":"TITULARES"} · ${state.formation||"4-3-3"}`;container.innerHTML="";
- const auto=autoLayout(arr);
+ $("pvTeam").textContent=teamData(team).name||team.toUpperCase();$("pvEyebrow").textContent=`${mode==="bench"?"SUPLENTES (sin editor de cancha)":"TITULARES"} · ${getTeamFormation(team)}`;container.innerHTML="";
+ const auto=autoLayout(arr,team);
  arr.forEach((p,i)=>{
-  const pos=p.x!=null&&p.y!=null?{x:p.x,y:p.y}:(auto[p.id]||fallbackPosition(i,arr.length)),el=document.createElement("div");el.className="previewPlayer";el.style.left=pos.x+"%";el.style.top=pos.y+"%";
+  const pos=p.x!=null&&p.y!=null?{x:p.x,y:p.y}:(auto[p.id]||fallbackPosition(i,arr.length,team)),el=document.createElement("div");el.className="previewPlayer";el.style.left=pos.x+"%";el.style.top=pos.y+"%";
   const bg=p.photo?`style="background-image:url('${esc(p.photo)}')"`:"";
   const badge=p.captain?'<span class="capBadge">C</span>':p.subcaptain?'<span class="capBadge sub">SC</span>':"";
   el.innerHTML=`<div class="previewDot ${p.photo?"hasPhoto":""}" ${bg}>${esc(p.number||i+1)}${badge}</div><b>${esc(p.name)}</b><small>${esc(p.position||"")}</small>`;
   container.appendChild(el);
   makeDraggable(el.querySelector(".previewDot"),el,p,team);
  })
+}
+
+/* Formación: automática por equipo + ajuste manual opcional */
+$("formationPreset").onchange=()=>{const v=$("formationPreset").value,team=$("viewTeam").value||"home";if(v==="custom"){$("customFormationWrap").classList.remove("hidden");$("formation").focus();return}$("customFormationWrap").classList.add("hidden");$("formation").value=v;save({[team+"/formation"]:v});renderAdminPreview()};
+$("formation").addEventListener("change",()=>{const team=$("viewTeam").value||"home",value=$("formation").value.trim()||"4-3-3";save({[team+"/formation"]:value});renderAdminPreview()});
+function persistMatchFields(){save({competition:$("competition").value.trim(),formation:$("formation").value.trim()||"4-3-3","home/name":$("homeName").value.trim()||"LOCAL","home/logo":$("homeLogo").value.trim(),"away/name":$("awayName").value.trim()||"VISITANTE","away/logo":$("awayLogo").value.trim(),"settings/animStyle":$("animStyle").value,"settings/animDelay":Math.max(80,Math.min(1200,Number($("animDelay").value)||180))})}
+["competition","homeName","homeLogo","awayName","awayLogo","animStyle","animDelay"].forEach(id=>$(id).addEventListener("change",persistMatchFields));
+$("swapTeams").onclick=async()=>{
+ const home=teamData("home"),away=teamData("away");
+ await save({
+  "home/name":away.name,"home/logo":away.logo,"home/formation":away.formation||"4-3-3","home/players":away.players.map(p=>({...p,team:"home"})),
+  "away/name":home.name,"away/logo":home.logo,"away/formation":home.formation||"4-3-3","away/players":home.players.map(p=>({...p,team:"away"}))
+ });
+};
+
+function fallbackPosition(i,total,team="home"){const rows=formationRows(team),rowCount=rows.length;let n=0;for(let row=0;row<rows.length;row++)for(let j=0;j<rows[row];j++){if(n===i)return {x:18+((j+1)/(rows[row]+1))*64,y:rowCount>1?8+(row/(rowCount-1))*84:50};n++}return {x:50,y:50}}
+function classifiedGroups(list){const groups={GK:[],DEF:[],MID:[],FWD:[]};list.forEach(p=>groups[classifyLine(p.position)].push(p));return groups}
+function autoLayout(list,team="home"){const rows=formationRows(team),rowCount=rows.length,groups=classifiedGroups(list),positions={};function placeRow(arr,rowIdx){if(!arr.length)return;const y=rowCount>1?8+(rowIdx/(rowCount-1))*84:50,n=arr.length;arr.forEach((p,j)=>positions[p.id]={x:18+((j+1)/(n+1))*64,y})}placeRow(groups.GK,0);placeRow(groups.DEF,1);if(rowCount<=4){placeRow(groups.MID,rowCount>=3?2:1);placeRow(groups.FWD,rowCount-1)}else{const midRowsIdx=[];for(let r=2;r<=rowCount-2;r++)midRowsIdx.push(r);const totalMidSlots=midRowsIdx.reduce((a,r)=>a+rows[r],0)||midRowsIdx.length;let cursor=0;midRowsIdx.forEach((r,idx)=>{const isLast=idx===midRowsIdx.length-1;const share=isLast?groups.MID.length-cursor:Math.round((rows[r]/totalMidSlots)*groups.MID.length);placeRow(groups.MID.slice(cursor,cursor+share),r);cursor+=share});placeRow(groups.FWD,rowCount-1)}return positions}
+/* Recalcula y guarda la posición (texto) de todos los titulares de un equipo según su orden actual y la formación */
+async function autoAssignPositions(team){
+ const ps=starters(team),ids=new Set(ps.map(p=>p.id));
+ const relabeled=ps.map((p,i)=>({...p,position:p.position||autoPositionForIndex(i,team)}));
+ const merged=teamData(team).players.map(p=>ids.has(p.id)?relabeled.find(r=>r.id===p.id):p);
+ await save({[team+"/players"]:merged});
 }
 function makeDraggable(dot,wrapper,player,team){
  dot.addEventListener("pointerdown",e=>{
@@ -696,14 +615,14 @@ function renderOverlay(){
  const team=state.settings.activeTeam||"home",scope=state.settings.scope||"all",td=teamData(team),bs=subs(team);
  const ps=scope==="BENCH"?[]:scopedPlayers(team,scope);
  const scopeLabel={all:"TITULARES",GK:"ARQUERO",DEF:"DEFENSAS",MID:"MEDIOCAMPISTAS",FWD:"DELANTEROS",BENCH:"SUPLENTES"}[scope]||"TITULARES";
- $("ovCompetition").textContent=state.competition||"ALINEACIONES";$("lineupTeam").textContent=td.name||team.toUpperCase();$("lineupFormation").textContent=state.formation||"4-3-3";$("lowerName").textContent=td.name||team.toUpperCase();$("lineupEyebrow").textContent=scopeLabel;
+ $("ovCompetition").textContent=state.competition||"ALINEACIONES";$("lineupTeam").textContent=td.name||team.toUpperCase();$("lineupFormation").textContent=getTeamFormation(team);$("lowerName").textContent=td.name||team.toUpperCase();$("lineupEyebrow").textContent=scopeLabel;
  $("ovLogoHome").src=teamData("home").logo||"";$("ovLogoAway").src=teamData("away").logo||"";$("ovLogoHome").style.display=teamData("home").logo?"block":"none";$("ovLogoAway").style.display=teamData("away").logo?"block":"none";$("ovBadgeHomeText").textContent=teamData("home").logo?"":teamData("home").name;$("ovBadgeAwayText").textContent=teamData("away").logo?"":teamData("away").name;
  const layer=$("playersLayer");layer.innerHTML="";
  if(scope==="BENCH"){
-  bs.forEach((p,i)=>{const pos=fallbackPosition(i,bs.length),el=document.createElement("div");el.className="player";el.dataset.line="BENCH";el.style.left=pos.x+"%";el.style.top=pos.y+"%";const photo=p.photo?`style="background-image:url('${esc(p.photo)}')"`:"";const badge=p.captain?'<span class="captainBadge">C</span>':p.subcaptain?'<span class="captainBadge sub">SC</span>':"";el.innerHTML=`<div class="playerDot ${p.photo?"hasPhoto":""}" ${photo}><span>${esc(p.number||i+1)}</span>${badge}</div><div class="playerName">${esc(p.name)}</div><div class="playerPos">${esc(p.position||"")}</div>`;layer.appendChild(el)});
+  bs.forEach((p,i)=>{const pos=fallbackPosition(i,bs.length,team),el=document.createElement("div");el.className="player";el.dataset.line="BENCH";el.style.left=pos.x+"%";el.style.top=pos.y+"%";const photo=p.photo?`style="background-image:url('${esc(p.photo)}')"`:"";const badge=p.captain?'<span class="captainBadge">C</span>':p.subcaptain?'<span class="captainBadge sub">SC</span>':"";el.innerHTML=`<div class="playerDot ${p.photo?"hasPhoto":""}" ${photo}><span>${esc(p.number||i+1)}</span>${badge}</div><div class="playerName">${esc(p.name)}</div><div class="playerPos">${esc(p.position||"")}</div>`;layer.appendChild(el)});
   $("benchChips").innerHTML="";
  }else{
-  const auto=autoLayout(ps);
+  const auto=autoLayout(ps,team)
   ps.forEach((p,i)=>{const pos=p.x!=null&&p.y!=null?{x:p.x,y:p.y}:(auto[p.id]||fallbackPosition(i,ps.length)),el=document.createElement("div");el.className="player "+team;el.dataset.line=classifyLine(p.position);el.style.left=pos.x+"%";el.style.top=pos.y+"%";const photo=p.photo?`style="background-image:url('${esc(p.photo)}')"`:"";const badge=p.captain?'<span class="captainBadge">C</span>':p.subcaptain?'<span class="captainBadge sub">SC</span>':"";el.innerHTML=`<div class="playerDot ${p.photo?"hasPhoto":""}" ${photo}><span>${esc(p.number||i+1)}</span>${badge}</div><div class="playerName">${esc(p.name)}</div><div class="playerPos">${esc(p.position||"")}</div>`;layer.appendChild(el)});
   $("benchChips").innerHTML=(scope==="all"?bs:[]).map(p=>`<span class="benchChip">${esc(p.number?`#${p.number} `:"")}${esc(p.name)}</span>`).join("");
  }
@@ -761,10 +680,12 @@ ref.on("value",snap=>{
   state=deepMerge(defaults,snap.val()||{});
   if(wantsAdmin){
    $("competition").value=state.competition||"";
-   applyFormationToUI(state.formation||"4-3-3");
+   const activeTeam=$("viewTeam").value||"home";
+   const activeFormation=getTeamFormation(activeTeam);
+   const preset=VALID_FORMATIONS.includes(activeFormation)?activeFormation:"custom";
+   $("formationPreset").value=preset;$("formation").value=activeFormation||"";$("customFormationWrap").classList.toggle("hidden",preset!=="custom");
    $("homeName").value=state.home.name||"";$("homeLogo").value=state.home.logo||"";$("awayName").value=state.away.name||"";$("awayLogo").value=state.away.logo||"";
    $("animStyle").value=state.settings.animStyle||"cinematic";$("animDelay").value=state.settings.animDelay||180;
-   $("autoFormationToggle").checked=state.settings.autoFormation!==false;
    $("pTeam").value=$("viewTeam").value;
    renderRoster();
   }else{
